@@ -8,6 +8,7 @@ public class UIManager : MonoBehaviour
 {
     public static UIManager Instance { get; private set; }
 
+
     [Header("HUD Principal")]
     public GameObject hudPanel;
     public TextMeshProUGUI characterNameText;
@@ -206,7 +207,9 @@ public class UIManager : MonoBehaviour
             }
         }
     }
-
+public void ShowCastBar(string skillName, float duration) { }
+public void UpdateCastBar(float remaining) { }
+public void HideCastBar() { }
     public void UpdateLocalCharacterData(CharacterData character)
     {
         localCharacterData = character;
