@@ -4,21 +4,27 @@ using System.Linq;
 using Newtonsoft.Json.Linq;
 
 /// <summary>
-/// ✅ MessageHandler COMPLETO - Trata TODOS os tipos de mensagem do servidor
+/// ✅ MessageHandler CLIENTE - Com suporte a Skills
+/// Este é diferente do MessageHandler.cs do servidor!
 /// </summary>
 public class MessageHandler : MonoBehaviour
 {
     public static MessageHandler Instance { get; private set; }
 
-    // Eventos para cada tipo de mensagem
+    // ==================== EVENTOS ====================
+    
+    // Login/Account
     public event Action<LoginResponseData> OnLoginResponse;
     public event Action<RegisterResponseData> OnRegisterResponse;
     public event Action<CreateCharacterResponseData> OnCreateCharacterResponse;
     public event Action<SelectCharacterResponseData> OnSelectCharacterResponse;
+
+    // Multiplayer
     public event Action<PlayerJoinedData> OnPlayerJoined;
     public event Action<string> OnPlayerDisconnected;
     public event Action<WorldStateData> OnWorldStateUpdate;
-    
+
+    // Combat
     public event Action<CombatResultData> OnCombatResult;
     public event Action<LevelUpData> OnLevelUp;
     public event Action<PlayerDeathData> OnPlayerDeath;
@@ -26,13 +32,17 @@ public class MessageHandler : MonoBehaviour
     public event Action<AttackStartedData> OnAttackStarted;
     public event Action<PlayerAttackData> OnPlayerAttack;
     public event Action<StatusPointAddedData> OnStatusPointAdded;
-    
+
+    // Inventory
     public event Action<InventoryData> OnInventoryReceived;
     public event Action<LootReceivedData> OnLootReceived;
     public event Action<ItemUsedData> OnItemUsed;
     public event Action<ItemEquippedData> OnItemEquipped;
     public event Action<ItemEquippedData> OnItemUnequipped;
     public event Action<ItemDroppedData> OnItemDropped;
+
+    // ✅ NOVO: Skills
+    public event Action<string> OnSkillResponse;
 
     private void Awake()
     {
@@ -62,15 +72,13 @@ public class MessageHandler : MonoBehaviour
             var json = JObject.Parse(message);
             var type = json["type"]?.ToString();
 
-            // 🔍 LOG para debug - mostra o tipo de mensagem recebida
             Debug.Log($"📨 Message type: '{type}'");
 
             switch (type)
             {
-				case "pong":
-					// Silencioso - ping/pong funcionando
-					break;
-                // ==================== LOGIN/ACCOUNT ====================
+                case "pong":
+                    break;
+
                 case "loginResponse":
                     HandleLoginResponse(json);
                     break;
@@ -79,7 +87,6 @@ public class MessageHandler : MonoBehaviour
                     HandleRegisterResponse(json);
                     break;
 
-                // ==================== CHARACTER ====================
                 case "createCharacterResponse":
                     HandleCreateCharacterResponse(json);
                     break;
@@ -88,7 +95,6 @@ public class MessageHandler : MonoBehaviour
                     HandleSelectCharacterResponse(json);
                     break;
 
-                // ==================== WORLD/PLAYERS ====================
                 case "playerJoined":
                     HandlePlayerJoined(json);
                     break;
@@ -101,12 +107,10 @@ public class MessageHandler : MonoBehaviour
                     HandleWorldState(json);
                     break;
 
-                // ==================== MOVEMENT ====================
                 case "moveAccepted":
                     Debug.Log("✅ Move accepted");
                     break;
 
-                // ==================== COMBAT ====================
                 case "combatResult":
                     HandleCombatResult(json);
                     break;
@@ -114,26 +118,23 @@ public class MessageHandler : MonoBehaviour
                 case "attackStarted":
                     HandleAttackStarted(json);
                     break;
-                
+
                 case "playerAttack":
                     HandlePlayerAttack(json);
                     break;
 
-                // ==================== LEVEL/STATS ====================
                 case "levelUp":
                     HandleLevelUp(json);
                     break;
-                
+
                 case "statusPointAdded":
                     HandleStatusPointAdded(json);
                     break;
 
-                // ✅ CRÍTICO: Atualização de stats (HP/MP após usar poção)
                 case "playerStatsUpdate":
                     HandlePlayerStatsUpdate(json);
                     break;
 
-                // ==================== DEATH/RESPAWN ====================
                 case "playerDeath":
                     HandlePlayerDeath(json);
                     break;
@@ -146,7 +147,6 @@ public class MessageHandler : MonoBehaviour
                     Debug.Log("✅ Respawn response received");
                     break;
 
-                // ==================== INVENTORY/ITEMS ====================
                 case "inventoryResponse":
                     HandleInventoryResponse(json);
                     break;
@@ -175,7 +175,15 @@ public class MessageHandler : MonoBehaviour
                     HandleItemDropped(json);
                     break;
 
-                // ==================== ERRORS ====================
+                // ✅ NOVO: SKILLS
+                case "skillCast":
+                case "skillCastBroadcast":
+                case "learnSkillResponse":
+                case "skillsResponse":
+                case "learnableSkillsResponse":
+                    OnSkillResponse?.Invoke(message);
+                    break;
+
                 case "error":
                     string errorMsg = json["message"]?.ToString() ?? "Unknown error";
                     Debug.LogError($"❌ Server error: {errorMsg}");
@@ -185,21 +193,16 @@ public class MessageHandler : MonoBehaviour
                     }
                     break;
 
-                // ==================== UNKNOWN ====================
                 default:
                     Debug.LogWarning($"⚠️ Unknown message type: '{type}'");
-                    Debug.LogWarning($"   Full message: {message.Substring(0, Math.Min(200, message.Length))}...");
                     break;
             }
         }
         catch (Exception ex)
         {
             Debug.LogError($"❌ Error parsing message: {ex.Message}");
-            Debug.LogError($"   Message preview: {message.Substring(0, Math.Min(100, message.Length))}...");
         }
     }
-
-    // ==================== HANDLERS ====================
 
     private void HandlePlayerStatsUpdate(JObject json)
     {
@@ -211,9 +214,6 @@ public class MessageHandler : MonoBehaviour
             int mana = json["mana"]?.ToObject<int>() ?? 0;
             int maxMana = json["maxMana"]?.ToObject<int>() ?? 0;
 
-            Debug.Log($"📊 Stats update: HP={health}/{maxHealth}, MP={mana}/{maxMana}");
-
-            // Atualiza UI se for o player local
             if (playerId == ClientManager.Instance.PlayerId && UIManager.Instance != null)
             {
                 UIManager.Instance.UpdateHealthBar(health, maxHealth);
@@ -309,11 +309,8 @@ public class MessageHandler : MonoBehaviour
             newStats = json["newStats"]?.ToObject<StatsData>()
         };
         
-        Debug.Log($"✅ Status point added: {data.stat} - Remaining: {data.statusPoints}");
         OnStatusPointAdded?.Invoke(data);
     }
-
-    // ==================== INVENTORY ====================
 
     private void HandleInventoryResponse(JObject json)
     {
@@ -412,7 +409,7 @@ public class MessageHandler : MonoBehaviour
             equipment = json["equipment"]?.ToObject<EquipmentData>()
         };
 
-        Debug.Log($"⚔️ Item unequipped: {json["slot"]}");
+        Debug.Log($"⚔️ Item unequipped");
         OnItemUnequipped?.Invoke(data);
     }
 
@@ -428,8 +425,6 @@ public class MessageHandler : MonoBehaviour
         Debug.Log($"📤 Item dropped: {data.instanceId}");
         OnItemDropped?.Invoke(data);
     }
-
-    // ==================== LOGIN/CHARACTER ====================
 
     private void HandleLoginResponse(JObject json)
     {
