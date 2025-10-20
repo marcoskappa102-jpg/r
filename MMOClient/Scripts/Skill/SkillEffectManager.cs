@@ -1,37 +1,54 @@
 using UnityEngine;
-using System.Collections;
 using System.Collections.Generic;
+using System.Linq;
+using Newtonsoft.Json;
 
 /// <summary>
-/// Gerencia todos os efeitos visuais de skills
-/// Coloque em: Assets/Scripts/Skills/SkillEffectManager.cs
+/// ✅ VERSÃO CORRIGIDA E MELHORADA
+/// Sistema de Skills com:
+/// - Casting e targeting correto
+/// - Cooldowns por skill
+/// - Buffs/Debuffs
+/// - Integração com servidor
+/// - Hotbar de skills
 /// </summary>
-public class SkillEffectManager : MonoBehaviour
+public class SkillManager : MonoBehaviour
 {
-    public static SkillEffectManager Instance { get; private set; }
+    public static SkillManager Instance { get; private set; }
 
-    [Header("AOE Indicator")]
-    public GameObject aoeIndicatorPrefab;
-    public Material aoeIndicatorMaterial;
-    public Color aoeColorValid = new Color(0f, 1f, 0f, 0.3f);
-    public Color aoeColorInvalid = new Color(1f, 0f, 0f, 0.3f);
+    [Header("Skill Database")]
+    public List<SkillData> allSkills = new List<SkillData>();
 
-    [Header("Default Effects")]
-    public GameObject defaultCastEffect;
-    public GameObject defaultHitEffect;
-    public GameObject defaultProjectile;
+    [Header("Hotbar")]
+    public SkillSlotUI[] hotbarSlots = new SkillSlotUI[9];
 
-    [Header("Pooling")]
-    public int effectPoolSize = 20;
+    [Header("Targeting")]
+    public GameObject aoeIndicatorInstance;
+    public LayerMask groundLayer;
+    public LayerMask monsterLayer;
 
-    private Dictionary<string, Queue<GameObject>> effectPools = new Dictionary<string, Queue<GameObject>>();
+    // Skills conhecidas pelo player
+    private Dictionary<int, SkillData> learnedSkills = new Dictionary<int, SkillData>();
+    
+    // Cooldowns ativos
+    private Dictionary<int, float> cooldowns = new Dictionary<int, float>();
+    
+    // Estado de casting
+    private bool isCasting = false;
+    private float castTimer = 0f;
+    private SkillData currentSkill;
+    private object currentTarget;
+
+    // Targeting
+    private bool isTargeting = false;
+    private SkillData targetingSkill;
+    private MonsterController selectedMonster;
 
     private void Awake()
     {
         if (Instance == null)
         {
             Instance = this;
-            DontDestroyOnLoad(gameObject);
         }
         else
         {
@@ -41,298 +58,567 @@ public class SkillEffectManager : MonoBehaviour
 
     private void Start()
     {
-        InitializeEffectPools();
-    }
-
-    // ==================== POOLING ====================
-
-    private void InitializeEffectPools()
-    {
-        if (defaultCastEffect != null)
+        // ✅ CORREÇÃO: Usa MessageHandler.Instance corretamente
+        // Você precisa adicionar um event no MessageHandler
+        if (MessageHandler.Instance != null)
         {
-            CreatePool("cast_default", defaultCastEffect, effectPoolSize);
-        }
-
-        if (defaultHitEffect != null)
-        {
-            CreatePool("hit_default", defaultHitEffect, effectPoolSize);
-        }
-
-        if (defaultProjectile != null)
-        {
-            CreatePool("projectile_default", defaultProjectile, effectPoolSize);
-        }
-    }
-
-    private void CreatePool(string poolName, GameObject prefab, int size)
-    {
-        if (effectPools.ContainsKey(poolName))
-            return;
-
-        var pool = new Queue<GameObject>();
-
-        for (int i = 0; i < size; i++)
-        {
-            var obj = Instantiate(prefab, transform);
-            obj.SetActive(false);
-            pool.Enqueue(obj);
-        }
-
-        effectPools[poolName] = pool;
-    }
-
-    private GameObject GetFromPool(string poolName)
-    {
-        if (!effectPools.ContainsKey(poolName) || effectPools[poolName].Count == 0)
-            return null;
-
-        var obj = effectPools[poolName].Dequeue();
-        obj.SetActive(true);
-        return obj;
-    }
-
-    private void ReturnToPool(string poolName, GameObject obj)
-    {
-        if (!effectPools.ContainsKey(poolName))
-            return;
-
-        obj.SetActive(false);
-        obj.transform.SetParent(transform);
-        effectPools[poolName].Enqueue(obj);
-    }
-
-    // ==================== AOE INDICATOR ====================
-
-    public GameObject CreateAOEIndicator(float radius)
-    {
-        GameObject indicator;
-
-        if (aoeIndicatorPrefab != null)
-        {
-            indicator = Instantiate(aoeIndicatorPrefab);
+            // MessageHandler agora tem OnSkillResponse event
+            MessageHandler.Instance.OnSkillResponse += HandleServerMessage;
         }
         else
         {
-            // Cria indicador procedural
-            indicator = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
-            Destroy(indicator.GetComponent<Collider>());
+            Debug.LogWarning("⚠️ MessageHandler.Instance não inicializado!");
+        }
+
+        LoadHotbar();
+    }
+
+    private void Update()
+    {
+        UpdateCooldowns();
+
+        if (isCasting)
+        {
+            UpdateCasting();
+        }
+
+        if (isTargeting)
+        {
+            UpdateTargeting();
+        }
+
+        CheckHotkeys();
+    }
+
+    // ==================== HOTKEYS ====================
+
+    private void CheckHotkeys()
+    {
+        if (isCasting || isTargeting)
+            return;
+
+        for (int i = 0; i < 9; i++)
+        {
+            KeyCode key = KeyCode.Alpha1 + i;
             
-            indicator.transform.localScale = new Vector3(radius * 2f, 0.01f, radius * 2f);
-            
-            var renderer = indicator.GetComponent<Renderer>();
-            
-            if (aoeIndicatorMaterial != null)
+            if (Input.GetKeyDown(key))
             {
-                renderer.material = aoeIndicatorMaterial;
+                UseSkillFromHotbar(i);
+            }
+        }
+    }
+
+    public void UseSkillFromHotbar(int slotIndex)
+    {
+        if (slotIndex < 0 || slotIndex >= hotbarSlots.Length)
+            return;
+
+        var slot = hotbarSlots[slotIndex];
+        
+        if (slot == null || slot.skillData == null)
+        {
+            Debug.Log("⚠️ Slot vazio");
+            return;
+        }
+
+        UseSkill(slot.skillData);
+    }
+
+    // ==================== USO DE SKILLS ====================
+
+    public void UseSkill(SkillData skill)
+    {
+        if (skill == null)
+            return;
+
+        if (isCasting)
+        {
+            ShowSkillMessage("Já está usando uma skill!");
+            return;
+        }
+
+        if (IsOnCooldown(skill.skillId))
+        {
+            float remaining = GetCooldownRemaining(skill.skillId);
+            ShowSkillMessage($"Aguarde {remaining:F1}s");
+            return;
+        }
+
+        switch (skill.targetType)
+        {
+            case TargetType.Single:
+                StartSingleTargeting(skill);
+                break;
+
+            case TargetType.Ground:
+                StartGroundTargeting(skill);
+                break;
+
+            case TargetType.Self:
+            case TargetType.NoTarget:
+                CastSkillImmediately(skill, null);
+                break;
+
+            case TargetType.Direction:
+                CastSkillInDirection(skill);
+                break;
+        }
+    }
+
+    // ==================== TARGETING ====================
+
+    private void StartSingleTargeting(SkillData skill)
+    {
+        if (selectedMonster != null && selectedMonster.isAlive)
+        {
+            CastSkillOnTarget(skill, selectedMonster.monsterId);
+        }
+        else
+        {
+            isTargeting = true;
+            targetingSkill = skill;
+            ShowSkillMessage($"Selecione um alvo para {skill.skillName}");
+        }
+    }
+
+    private void UpdateTargeting()
+    {
+        if (Input.GetKeyDown(KeyCode.Escape))
+        {
+            CancelTargeting();
+            return;
+        }
+
+        if (Input.GetMouseButtonDown(0))
+        {
+            Ray ray = Camera.main.ScreenPointToRay(Input.mousePosition);
+            RaycastHit hit;
+
+            if (Physics.Raycast(ray, out hit, 1000f, monsterLayer))
+            {
+                var monster = hit.collider.GetComponent<MonsterController>();
+                
+                if (monster != null && monster.isAlive)
+                {
+                    selectedMonster = monster;
+                    CastSkillOnTarget(targetingSkill, monster.monsterId);
+                    isTargeting = false;
+                    targetingSkill = null;
+                }
+            }
+        }
+    }
+
+    private void StartGroundTargeting(SkillData skill)
+    {
+        isTargeting = true;
+        targetingSkill = skill;
+        ShowAOEIndicator(skill.aoeRadius);
+        ShowSkillMessage($"Clique no chão para usar {skill.skillName}");
+    }
+
+    private void CancelTargeting()
+    {
+        isTargeting = false;
+        targetingSkill = null;
+        HideAOEIndicator();
+        ShowSkillMessage("Cancelado");
+    }
+
+    // ==================== CAST ====================
+
+    private void CastSkillImmediately(SkillData skill, object target)
+    {
+        StartCast(skill, target);
+    }
+
+    private void CastSkillOnTarget(SkillData skill, int targetId)
+    {
+        currentTarget = targetId;
+        StartCast(skill, targetId);
+    }
+
+    private void CastSkillOnGround(SkillData skill, Vector3 position)
+    {
+        currentTarget = position;
+        StartCast(skill, position);
+    }
+
+    private void CastSkillInDirection(SkillData skill)
+    {
+        Ray ray = Camera.main.ScreenPointToRay(Input.mousePosition);
+        Vector3 direction = ray.direction;
+        currentTarget = direction;
+        StartCast(skill, direction);
+    }
+
+    private void StartCast(SkillData skill, object target)
+    {
+        currentSkill = skill;
+        currentTarget = target;
+
+        if (skill.castTime <= 0f)
+        {
+            ExecuteSkill();
+        }
+        else
+        {
+            isCasting = true;
+            castTimer = skill.castTime;
+            PlayCastAnimation(skill);
+            ShowSkillMessage($"Usando {skill.skillName}...");
+        }
+    }
+
+    private void UpdateCasting()
+    {
+        castTimer -= Time.deltaTime;
+
+        if (castTimer <= 0f)
+        {
+            ExecuteSkill();
+        }
+    }
+
+    private void ExecuteSkill()
+    {
+        isCasting = false;
+
+        if (currentSkill == null)
+            return;
+
+        SendSkillToServer(currentSkill, currentTarget);
+        StartCooldown(currentSkill.skillId, currentSkill.cooldown);
+        PlaySkillAnimation(currentSkill);
+
+        if (currentSkill.castSound != null)
+        {
+            AudioSource.PlayClipAtPoint(currentSkill.castSound, transform.position);
+        }
+
+        currentSkill = null;
+        currentTarget = null;
+    }
+
+    // ==================== COMUNICAÇÃO COM SERVIDOR ====================
+
+    private void SendSkillToServer(SkillData skill, object target)
+    {
+        var message = new
+        {
+            type = "castSkill",
+            skillId = skill.skillId,
+            targetId = target is int ? (int)target : 0,
+            targetPosition = target is Vector3 pos ? new { x = pos.x, y = pos.y, z = pos.z } : null
+        };
+
+        string json = JsonConvert.SerializeObject(message);
+        ClientManager.Instance.SendMessage(json);
+
+        Debug.Log($"⚡ Cast {skill.skillName} → Server");
+    }
+
+    // ✅ CORREÇÃO: Método correto para processar respostas do servidor
+    private void HandleServerMessage(string message)
+    {
+        try
+        {
+            var json = Newtonsoft.Json.Linq.JObject.Parse(message);
+            var type = json["type"]?.ToString();
+
+            switch (type)
+            {
+                case "skillCast":
+                case "skillCastBroadcast":
+                    HandleSkillCastResult(json);
+                    break;
+
+                case "learnSkillResponse":
+                    HandleLearnSkillResponse(json);
+                    break;
+
+                case "skillsResponse":
+                    HandleSkillsReceived(json);
+                    break;
+            }
+        }
+        catch (System.Exception ex)
+        {
+            Debug.LogError($"Erro processando resposta de skill: {ex.Message}");
+        }
+    }
+
+    private void HandleSkillCastResult(Newtonsoft.Json.Linq.JObject json)
+    {
+        bool success = json["success"]?.ToObject<bool>() ?? false;
+        string skillName = json["skillName"]?.ToString() ?? "";
+
+        if (!success)
+        {
+            string reason = json["failReason"]?.ToString() ?? "Falhou";
+            ShowSkillMessage($"❌ {skillName}: {TranslateFailReason(reason)}");
+            return;
+        }
+
+        var targetResults = json["targetResults"];
+        
+        if (targetResults != null)
+        {
+            foreach (var result in targetResults)
+            {
+                int damage = result["damage"]?.ToObject<int>() ?? 0;
+                int heal = result["heal"]?.ToObject<int>() ?? 0;
+                bool isCrit = result["isCritical"]?.ToObject<bool>() ?? false;
+                string targetName = result["targetName"]?.ToString() ?? "";
+
+                if (damage > 0)
+                {
+                    string critText = isCrit ? " CRÍTICO!" : "";
+                    ShowSkillMessage($"⚡ {skillName} → {targetName}: {damage}{critText}");
+                }
+                
+                if (heal > 0)
+                {
+                    ShowSkillMessage($"💚 {skillName}: +{heal} HP");
+                }
+            }
+        }
+    }
+
+    private void HandleLearnSkillResponse(Newtonsoft.Json.Linq.JObject json)
+    {
+        bool success = json["success"]?.ToObject<bool>() ?? false;
+        string message = json["message"]?.ToString() ?? "";
+
+        if (success)
+        {
+            var skillData = json["skill"];
+            int skillId = skillData["id"]?.ToObject<int>() ?? 0;
+            
+            var skill = allSkills.FirstOrDefault(s => s.skillId == skillId);
+            
+            if (skill != null && !learnedSkills.ContainsKey(skillId))
+            {
+                learnedSkills[skillId] = skill;
+                Debug.Log($"✅ Aprendida skill: {skill.skillName}");
+            }
+        }
+
+        ShowSkillMessage(message);
+    }
+
+    private void HandleSkillsReceived(Newtonsoft.Json.Linq.JObject json)
+    {
+        learnedSkills.Clear();
+
+        var skills = json["skills"];
+        
+        if (skills != null)
+        {
+            foreach (var skillJson in skills)
+            {
+                int skillId = skillJson["id"]?.ToObject<int>() ?? 0;
+                var skill = allSkills.FirstOrDefault(s => s.skillId == skillId);
+                
+                if (skill != null)
+                {
+                    learnedSkills[skillId] = skill;
+                }
+            }
+        }
+
+        Debug.Log($"📚 Carregadas {learnedSkills.Count} skills");
+    }
+
+    // ==================== COOLDOWNS ====================
+
+    private void UpdateCooldowns()
+    {
+        var keys = cooldowns.Keys.ToList();
+        
+        foreach (var skillId in keys)
+        {
+            cooldowns[skillId] -= Time.deltaTime;
+            
+            if (cooldowns[skillId] <= 0f)
+            {
+                cooldowns.Remove(skillId);
+                UpdateHotbarCooldown(skillId, 0f);
             }
             else
             {
-                var mat = new Material(Shader.Find("Standard"));
-                mat.color = aoeColorValid;
-                renderer.material = mat;
+                UpdateHotbarCooldown(skillId, cooldowns[skillId]);
             }
         }
-
-        indicator.name = "AOE_Indicator";
-        return indicator;
     }
 
-    public void UpdateAOEIndicator(GameObject indicator, Vector3 position, bool isValid)
+    public void StartCooldown(int skillId, float duration)
     {
-        if (indicator == null)
-            return;
-
-        indicator.transform.position = position;
-
-        var renderer = indicator.GetComponent<Renderer>();
-        if (renderer != null && renderer.material != null)
-        {
-            renderer.material.color = isValid ? aoeColorValid : aoeColorInvalid;
-        }
+        cooldowns[skillId] = duration;
     }
 
-    // ==================== CAST EFFECTS ====================
-
-    public void PlayCastEffect(SkillData skill, Vector3 position, Transform parent = null)
+    public bool IsOnCooldown(int skillId)
     {
-        GameObject effectPrefab = skill.castEffectPrefab ?? defaultCastEffect;
-
-        if (effectPrefab == null)
-            return;
-
-        var effect = GetFromPool("cast_" + skill.skillId) ?? Instantiate(effectPrefab);
-        
-        effect.transform.position = position;
-        
-        if (parent != null)
-        {
-            effect.transform.SetParent(parent);
-        }
-
-        StartCoroutine(AutoDestroyEffect(effect, skill.castTime, "cast_" + skill.skillId));
+        return cooldowns.ContainsKey(skillId);
     }
 
-    // ==================== HIT EFFECTS ====================
-
-    public void PlayHitEffect(SkillData skill, Vector3 position)
+    public float GetCooldownRemaining(int skillId)
     {
-        GameObject effectPrefab = skill.hitEffectPrefab ?? defaultHitEffect;
-
-        if (effectPrefab == null)
-            return;
-
-        var effect = GetFromPool("hit_" + skill.skillId) ?? Instantiate(effectPrefab);
-        effect.transform.position = position;
-
-        StartCoroutine(AutoDestroyEffect(effect, 2f, "hit_" + skill.skillId));
+        return cooldowns.ContainsKey(skillId) ? cooldowns[skillId] : 0f;
     }
 
-    // ==================== PROJECTILE ====================
-
-    public void LaunchProjectile(SkillData skill, Vector3 startPos, Vector3 targetPos, System.Action onHit = null)
+    private void UpdateHotbarCooldown(int skillId, float remaining)
     {
-        GameObject projectilePrefab = skill.projectilePrefab ?? defaultProjectile;
-
-        if (projectilePrefab == null)
+        foreach (var slot in hotbarSlots)
         {
-            // Se não tem projétil, hit instantâneo
-            onHit?.Invoke();
-            PlayHitEffect(skill, targetPos);
-            return;
-        }
-
-        var projectile = Instantiate(projectilePrefab, startPos, Quaternion.identity);
-        
-        // Rotaciona em direção ao alvo
-        Vector3 direction = (targetPos - startPos).normalized;
-        projectile.transform.rotation = Quaternion.LookRotation(direction);
-
-        // Inicia movimento
-        StartCoroutine(MoveProjectile(projectile, startPos, targetPos, 15f, () =>
-        {
-            onHit?.Invoke();
-            PlayHitEffect(skill, targetPos);
-            Destroy(projectile);
-        }));
-    }
-
-    private IEnumerator MoveProjectile(GameObject projectile, Vector3 start, Vector3 end, float speed, System.Action onComplete)
-    {
-        float distance = Vector3.Distance(start, end);
-        float duration = distance / speed;
-        float elapsed = 0f;
-
-        while (elapsed < duration)
-        {
-            elapsed += Time.deltaTime;
-            float t = elapsed / duration;
-            
-            projectile.transform.position = Vector3.Lerp(start, end, t);
-            
-            yield return null;
-        }
-
-        projectile.transform.position = end;
-        onComplete?.Invoke();
-    }
-
-    // ==================== SKILL VISUALS ====================
-
-    public void PlaySkillVisuals(SkillData skill, Vector3 casterPos, object target)
-    {
-        // Cast effect
-        PlayCastEffect(skill, casterPos);
-
-        if (target is int monsterId)
-        {
-            // Skill de alvo único
-            var monster = FindMonsterById(monsterId);
-            
-            if (monster != null)
+            if (slot != null && slot.skillData != null && slot.skillData.skillId == skillId)
             {
-                Vector3 targetPos = monster.transform.position + Vector3.up * 1.5f;
+                slot.UpdateCooldown(remaining);
+            }
+        }
+    }
 
-                if (skill.projectilePrefab != null || skill.skillType == SkillType.Attack)
+    // ==================== HOTBAR ====================
+
+    public void AssignSkillToHotbar(SkillData skill, int slotIndex)
+    {
+        if (slotIndex < 0 || slotIndex >= hotbarSlots.Length)
+            return;
+
+        if (!learnedSkills.ContainsKey(skill.skillId))
+        {
+            ShowSkillMessage("Você não conhece esta skill!");
+            return;
+        }
+
+        hotbarSlots[slotIndex].SetSkill(skill);
+        SaveHotbar();
+    }
+
+    public void ClearHotbarSlot(int slotIndex)
+    {
+        if (slotIndex >= 0 && slotIndex < hotbarSlots.Length)
+        {
+            hotbarSlots[slotIndex].ClearSlot();
+            SaveHotbar();
+        }
+    }
+
+    private void SaveHotbar()
+    {
+        for (int i = 0; i < hotbarSlots.Length; i++)
+        {
+            if (hotbarSlots[i]?.skillData != null)
+            {
+                PlayerPrefs.SetInt($"Hotbar_{i}", hotbarSlots[i].skillData.skillId);
+            }
+            else
+            {
+                PlayerPrefs.DeleteKey($"Hotbar_{i}");
+            }
+        }
+        PlayerPrefs.Save();
+    }
+
+    private void LoadHotbar()
+    {
+        for (int i = 0; i < hotbarSlots.Length; i++)
+        {
+            if (PlayerPrefs.HasKey($"Hotbar_{i}"))
+            {
+                int skillId = PlayerPrefs.GetInt($"Hotbar_{i}");
+                var skill = allSkills.FirstOrDefault(s => s.skillId == skillId);
+                
+                if (skill != null && hotbarSlots[i] != null)
                 {
-                    LaunchProjectile(skill, casterPos + Vector3.up * 1.5f, targetPos);
-                }
-                else
-                {
-                    PlayHitEffect(skill, targetPos);
+                    hotbarSlots[i].SetSkill(skill);
                 }
             }
         }
-        else if (target is Vector3 groundPos)
+    }
+
+    // ==================== VISUAL ====================
+
+    private void ShowAOEIndicator(float radius)
+    {
+        if (aoeIndicatorInstance == null && SkillEffectManager.Instance != null)
         {
-            // Skill de área
-            PlayAOEEffect(skill, groundPos);
+            aoeIndicatorInstance = SkillEffectManager.Instance.CreateAOEIndicator(radius);
+        }
+
+        if (aoeIndicatorInstance != null)
+        {
+            aoeIndicatorInstance.SetActive(true);
         }
     }
 
-    private void PlayAOEEffect(SkillData skill, Vector3 position)
+    private void HideAOEIndicator()
     {
-        GameObject effectPrefab = skill.hitEffectPrefab ?? defaultHitEffect;
+        if (aoeIndicatorInstance != null)
+        {
+            aoeIndicatorInstance.SetActive(false);
+        }
+    }
 
-        if (effectPrefab == null)
-            return;
-
-        var effect = Instantiate(effectPrefab, position, Quaternion.identity);
+    private void PlayCastAnimation(SkillData skill)
+    {
+        var animator = GetComponent<Animator>();
         
-        // Escala baseado no raio
-        if (skill.aoeRadius > 0f)
+        if (animator != null && !string.IsNullOrEmpty(skill.animationTrigger))
         {
-            effect.transform.localScale = Vector3.one * skill.aoeRadius;
-        }
-
-        Destroy(effect, 3f);
-    }
-
-    // ==================== UTILITY ====================
-
-    private IEnumerator AutoDestroyEffect(GameObject effect, float delay, string poolName = null)
-    {
-        yield return new WaitForSeconds(delay);
-
-        if (poolName != null && effectPools.ContainsKey(poolName))
-        {
-            ReturnToPool(poolName, effect);
-        }
-        else if (effect != null)
-        {
-            Destroy(effect);
+            animator.SetTrigger(skill.animationTrigger);
         }
     }
 
-    private MonsterController FindMonsterById(int monsterId)
+    private void PlaySkillAnimation(SkillData skill)
     {
-        var monsters = FindObjectsOfType<MonsterController>();
-        
-        foreach (var monster in monsters)
-        {
-            if (monster.monsterId == monsterId)
-            {
-                return monster;
-            }
-        }
-
-        return null;
+        // Implementar conforme necessário
     }
 
-    // ==================== DAMAGE NUMBERS ====================
-
-    public void ShowDamageNumber(Vector3 position, int damage, bool isCritical)
+    private void ShowSkillMessage(string message)
     {
-        if (DamageTextManager.Instance != null)
+        if (UIManager.Instance != null)
         {
-            DamageTextManager.Instance.ShowDamage(position, damage, isCritical);
+            UIManager.Instance.AddCombatLog(message);
         }
     }
 
-    public void ShowHealNumber(Vector3 position, int heal)
+    private string TranslateFailReason(string reason)
     {
-        if (DamageTextManager.Instance != null)
+        return reason switch
         {
-            DamageTextManager.Instance.ShowHeal(position, heal);
+            "CASTER_NOT_FOUND" => "Player não encontrado",
+            "SKILL_NOT_FOUND" => "Skill não existe",
+            "CASTER_DEAD" => "Você está morto!",
+            "SKILL_NOT_LEARNED" => "Você não aprendeu esta skill",
+            "INSUFFICIENT_MANA" => "Mana insuficiente",
+            "INSUFFICIENT_HEALTH" => "HP insuficiente",
+            "ON_COOLDOWN" => "Aguarde o cooldown",
+            "TARGET_NOT_FOUND" => "Alvo não encontrado",
+            "OUT_OF_RANGE" => "Muito longe!",
+            _ => reason
+        };
+    }
+
+    // ==================== PUBLIC API ====================
+
+    public List<SkillData> GetLearnedSkills()
+    {
+        return learnedSkills.Values.ToList();
+    }
+
+    public void RequestSkillsFromServer()
+    {
+        var message = new { type = "getSkills" };
+        string json = JsonConvert.SerializeObject(message);
+        ClientManager.Instance.SendMessage(json);
+    }
+
+    private void OnDestroy()
+    {
+        if (MessageHandler.Instance != null)
+        {
+            MessageHandler.Instance.OnSkillResponse -= HandleServerMessage;
         }
     }
 }
